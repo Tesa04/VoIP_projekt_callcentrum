@@ -1,0 +1,985 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Call centrum na Asterisku – Analýza strategií fronty a čekací doby | VoIP I</title>
+  <meta name="description" content="Semestrální projekt VoIP I (FEI VŠB-TUO): Call centrum na Asterisku – měření čekací doby podle strategie fronty (ringall, leastrecent, fewestcalls), počtu agentů a hloubky IVR." />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- Horní navigace -->
+  <nav class="navbar">
+    <div class="nav-inner">
+      <a href="#top" class="nav-brand">
+        <span class="dot"></span>
+        VoIP I · Call centrum na Asterisku
+      </a>
+      <ul class="nav-links">
+        <li><a href="#uvod">Úvod</a></li>
+        <li><a href="#soucasny-stav">Současný stav</a></li>
+        <li><a href="#konfigurace">Konfigurace</a></li>
+        <li><a href="#mereni">Měření &amp; Grafy</a></li>
+        <li><a href="#prinos">Názor &amp; Přínos</a></li>
+        <li><a href="#zaver">Závěr</a></li>
+        <li><a href="#dukazy">Důkazy &amp; Video</a></li>
+        <li><a href="#reference">Reference</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <!-- Úvodní hlavička (Název projektu) -->
+  <header id="top" class="hero">
+    <div class="hero-inner">
+      <div class="hero-badges">
+        <span class="badge badge-glass">FEI VŠB-TU Ostrava · VoIP I</span>
+        <span class="badge badge-accent">Téma #8 · Call centrum na Asterisku</span>
+        <span class="badge badge-glass">Asterisk 22.5.2 · PJSIP · app_queue</span>
+      </div>
+      <h1>Call centrum na Asterisku: Vliv strategie fronty, počtu agentů a hloubky IVR na čekací dobu</h1>
+      <p class="hero-subtitle">
+        Návrh, implementace a experimentální vyhodnocení distribuce příchozích hovorů (ACD) v ústředně Asterisk
+        pro přidělenou variantu: <strong>strategie fronty (<code style="color:#fff">ringall</code> / <code style="color:#fff">leastrecent</code> / <code style="color:#fff">fewestcalls</code>) × počet agentů × hloubka IVR</strong>.
+      </p>
+      <div class="hero-meta">
+        <div><strong>Autor:</strong> Matouš Těšínský, Jan Theuer</div>
+        <div><strong>Předmět:</strong> VoIP I (2026)</div>
+        <div><strong>Testovací prostředí:</strong> Asterisk 22.5.2 (WSL Ubuntu) + MicroSIP 3.23.6</div>
+        <div><strong>Naměřený vzorek:</strong> 20 hovorů, 508 SIP paketů</div>
+      </div>
+      <div class="hero-actions">
+        <a href="#mereni" class="btn btn-primary">Zobrazit naměřené výsledky</a>
+        <a href="#dukazy" class="btn btn-outline">Důkazový balíček &amp; Demo video</a>
+        <a href="https://github.com/Tesa04/VoIP_projekt_callcentrum" target="_blank" rel="noopener" class="btn btn-outline">GitHub repozitář ↗</a>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+
+    <!-- ================================================================ -->
+    <!-- 1. ÚVOD                                                          -->
+    <!-- ================================================================ -->
+    <section id="uvod">
+      <div class="section-header">
+        <div class="section-kicker">1. Úvod</div>
+        <h2>Popis tématu a cíl přidělené varianty</h2>
+      </div>
+      <div class="card">
+        <p>
+          Zákaznická call centra tvoří jeden z nejnáročnějších scénářů nasazení IP telefonie (VoIP). Na rozdíl od běžného
+          kancelářského volání zde přicházejí hovory v nárazových špičkách a pobočková ústředna musí v reálném čase
+          rozhodovat o zařazení volajícího do čekací fronty, přehrání interaktivního hlasového menu (IVR) a přidělení hovoru
+          nejvhodnějšímu dostupnému operátorovi (agentovi).
+        </p>
+        <p>
+          Cílem tohoto projektu je vybudovat funkční prototyp call centra na open-source pobočkové ústředně
+          <strong>Asterisk</strong> s využitím moderního SIP zásobníku <strong>PJSIP</strong> (<code class="inline">res_pjsip</code>)
+          a modulu front (<code class="inline">app_queue</code>), a následně exaktně změřit a porovnat chování čekací doby pro
+          přidělenou technickou variantu:
+        </p>
+        <ul>
+          <li><strong>Strategie směrování fronty:</strong> <code class="inline">ringall</code>, <code class="inline">leastrecent</code> a <code class="inline">fewestcalls</code> při běžném odbavení i při simulovaném nezvednutí hovoru prvním osloveným agentem (<code class="inline">RINGNOANSWER</code>).</li>
+          <li><strong>Počet aktivních agentů:</strong> porovnání dostupnosti 3 agentů (<code class="inline">101</code>–<code class="inline">103</code>) oproti omezení kapacity na 1 aktivního agenta při souběžných hovorech.</li>
+          <li><strong>Hloubka stromu IVR:</strong> vliv přímého vstupu do fronty (hloubka 0), jednoúrovňového menu (hloubka 1) a dvouúrovňového menu (hloubka 2) na celkovou dobu od vytočení po spojení s operátorem.</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- ================================================================ -->
+    <!-- 2. SOUČASNÝ STAV                                                 -->
+    <!-- ================================================================ -->
+    <section id="soucasny-stav">
+      <div class="section-header">
+        <div class="section-kicker">2. Současný stav řešené problematiky</div>
+        <h2>Moderní call centra, ACD a řízení kvality obsluhy</h2>
+      </div>
+      <div class="grid-2">
+        <div class="card">
+          <h3>Architektura ACD a role protokolu SIP</h3>
+          <p>
+            Jádrem každého moderního kontaktního centra je systém <strong>ACD (Automatic Call Distribution)</strong>,
+            který nahrazuje ruční přepojování operátorkou. Příchozí hovor je nejprve odbaven hlasovým automatem
+            <strong>IVR (Interactive Voice Response)</strong> na základě tónové volby DTMF (RFC 4733) nebo hlasového
+            rozpoznávání, poté je zařazen do příslušné dovednostní či oddělené fronty a směrován agentům dle zvoleného
+            algoritmu.
+          </p>
+          <p>
+            Na síťové vrstvě dnes jednoznačně dominuje protokol <strong>SIP (RFC 3261)</strong> pro signalizaci a
+            <strong>RTP</strong> pro přenos hlasu. V prostředí Asterisku byl dřívější kanálový ovladač <code class="inline">chan_sip</code>
+            od verze Asterisk 21 zcela odstraněn a standardem je modulární architektura <strong>PJSIP</strong>.
+          </p>
+        </div>
+        <div class="card">
+          <h3>Klíčové metriky a open-source vs. cloud</h3>
+          <p>
+            Kvalita provozu call centra se hodnotí především metrikami <strong>ASA (Average Speed of Answer)</strong> –
+            průměrnou dobou čekání ve frontě (<code class="inline">holdtime</code>), <strong>SLA (Service Level Agreement)</strong>
+            (např. 80 % hovorů zvednuto do 20 s) a mírou předčasného zavěšení volajících (<em>Abandonment Rate</em>).
+          </p>
+          <p>
+            Vedle komerčních cloudových platforem CCaaS (Genesys Cloud, Amazon Connect, Twilio Flex) zůstává
+            <strong>Asterisk</strong> (případně nadstavby FreePBX, Issabel či VICIdial) nejrozšířenějším open-source
+            řešením pro on-premise firemní ústředny díky plné kontrole nad dialplanem, detailnímu logování
+            (<code class="inline">queue_log</code>, CDR) a nulovým licenčním poplatkům za agenta.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================================================================ -->
+    <!-- 3. KONFIGURACE A VARIANTA                                        -->
+    <!-- ================================================================ -->
+    <section id="konfigurace">
+      <div class="section-header">
+        <div class="section-kicker">3. Technologie, topologie a konfigurace</div>
+        <h2>Implementace call centra pro přidělenou variantu</h2>
+      </div>
+
+      <!-- Topologie -->
+      <div class="card" style="margin-bottom: 22px;">
+        <h3 style="margin-top:0;">Topologie testovacího prostředí</h3>
+        <p>
+          Ústředna <strong>Asterisk 22.5.2</strong> běží v prostředí Ubuntu (WSL2) na adrese <code class="inline">192.168.29.69:5060/UDP</code>.
+          Klientskou část simuluje 5 nezávislých přenosných instancí softphonu <strong>MicroSIP 3.23.6</strong> na Windows
+          (3 agenti + 2 volající), přičemž veškerý SIP provoz je zachytáván nástrojem <code class="inline">tcpdump</code>
+          a vyhodnocován společně s interními logy Asterisku.
+        </p>
+        <div class="topology-box">
+          <div class="topo-node">
+            <h4>Volající (Zákazníci)</h4>
+            <p>MicroSIP klapky <strong>201</strong> a <strong>202</strong><br/>Vytáčí <code>501–503</code>, <code>600</code>, <code>700</code></p>
+          </div>
+          <div class="topo-arrow">⟶</div>
+          <div class="topo-node core">
+            <h4>Asterisk 22.5.2 (PBX)</h4>
+            <p><code>pjsip.conf</code> · <code>queues.conf</code> · <code>extensions.conf</code><br/>IVR (0 / 1 / 2 úrovně) + 3 fronty ACD<br/>Logování: <code>queue_log</code>, <code>CDR</code>, <code>tcpdump</code></p>
+          </div>
+          <div class="topo-arrow">⟶</div>
+          <div class="topo-node">
+            <h4>Operátoři (Agenti)</h4>
+            <p>MicroSIP klapky <strong>101</strong>, <strong>102</strong>, <strong>103</strong><br/>Dynamické pozastavení přes <code>queue pause</code></p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Popis 3 strategií -->
+      <div class="grid-3" style="margin-bottom: 22px;">
+        <div class="card">
+          <span class="pill pill-blue">Klapka 501 · fronta_ringall</span>
+          <h3>Strategie <code class="inline">ringall</code></h3>
+          <p>
+            Asterisk odešle požadavek <code class="inline">SIP INVITE</code> <strong>všem dostupným agentům současně</strong>.
+            Jakmile hovor zvedne nejrychlejší z nich (<code class="inline">200 OK</code>), ústředna okamžitě rozešle
+            ostatním <code class="inline">CANCEL</code> s hlavičkou <code class="inline">Call completed elsewhere</code>.
+            Minimalizuje čekací dobu, ale nezaručuje rovnoměrné vytížení agentů.
+          </p>
+        </div>
+        <div class="card">
+          <span class="pill pill-teal">Klapka 502 · fronta_leastrecent</span>
+          <h3>Strategie <code class="inline">leastrecent</code></h3>
+          <p>
+            Hovor je směrován výhradně <strong>jednomu agentovi</strong>, který byl osloven (přijal hovor)
+            <strong>nejdávněji</strong>. Zajišťuje férový odpočinek mezi hovory. Pokud však vybraný agent hovor
+            v limitu <code class="inline">timeout = 5 s</code> nezvedne, volající zbytečně čeká po celou dobu
+            <code class="inline">timeout + retry</code>.
+          </p>
+        </div>
+        <div class="card">
+          <span class="pill pill-amber">Klapka 503 · fronta_fewestcalls</span>
+          <h3>Strategie <code class="inline">fewestcalls</code></h3>
+          <p>
+            Hovor dostane <strong>jeden agent s nejnižším počtem vyřízených hovorů</strong> v dané frontě.
+            Vyrovnává celkovou pracovní zátěž týmu (bez ohledu na délku jednotlivých hovorů). Stejně jako u
+            <code class="inline">leastrecent</code> je citlivá na neodpovídajícího operátora.
+          </p>
+        </div>
+      </div>
+
+      <!-- Testovací matice -->
+      <div class="card" style="margin-bottom: 22px;">
+        <h3 style="margin-top:0;">Navržená testovací matice a parametry fronty</h3>
+        <p>
+          Pro porovnatelnost výsledků byly všechny tři fronty v <code class="inline">queues.conf</code> odvozeny ze společné
+          šablony s parametry <code class="inline">timeout = 5</code> (maximální doba vyzvánění u agenta),
+          <code class="inline">retry = 1</code> (pauza před dalším pokusem) a <code class="inline">ringinuse = no</code>
+          (obsazenému agentovi není doručován druhý hovor).
+        </p>
+        <div class="table-wrap" style="margin-bottom:0;">
+          <table>
+            <thead>
+              <tr>
+                <th>Testovací blok</th>
+                <th>Volaná klapka</th>
+                <th>Strategie fronty</th>
+                <th class="ctr">Aktivní agenti</th>
+                <th class="ctr">Hloubka IVR</th>
+                <th>Popis experimentu</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Blok 1A – Paralelní směrování</strong></td>
+                <td><code class="inline">501</code></td>
+                <td><code class="inline">ringall</code></td>
+                <td class="ctr">3 (101–103)</td>
+                <td class="ctr">0</td>
+                <td>5 hovorů z klapky 201; měření rychlosti spojení a rozdělení hovorů mezi operátory.</td>
+              </tr>
+              <tr>
+                <td><strong>Blok 1B – Nejdéle čekající agent</strong></td>
+                <td><code class="inline">502</code></td>
+                <td><code class="inline">leastrecent</code></td>
+                <td class="ctr">3 (101–103)</td>
+                <td class="ctr">0</td>
+                <td>3 hovory zvednuty napoprvé + 2 hovory se simulací nezvednutí (vypršení 5s timeoutu).</td>
+              </tr>
+              <tr>
+                <td><strong>Blok 1C – Nejméně hovorů</strong></td>
+                <td><code class="inline">503</code></td>
+                <td><code class="inline">fewestcalls</code></td>
+                <td class="ctr">3 (101–103)</td>
+                <td class="ctr">0</td>
+                <td>3 hovory zvednuty napoprvé + 2 hovory se simulací nezvednutí (vypršení 5s timeoutu).</td>
+              </tr>
+              <tr>
+                <td><strong>Blok 2 – Přetížení kapacity</strong></td>
+                <td><code class="inline">501</code></td>
+                <td><code class="inline">ringall</code></td>
+                <td class="ctr">1 (jen 101)</td>
+                <td class="ctr">0</td>
+                <td>Agenti 102 a 103 pozastaveni (<code class="inline">queue pause</code>); 2 souběžné hovory z 201 a 202.</td>
+              </tr>
+              <tr>
+                <td><strong>Blok 3 – Hloubka stromu IVR</strong></td>
+                <td><code class="inline">501</code> / <code class="inline">600</code> / <code class="inline">700</code></td>
+                <td><code class="inline">ringall</code></td>
+                <td class="ctr">3 (101–103)</td>
+                <td class="ctr">0 / 1 / 2</td>
+                <td>Porovnání přímého vstupu, 1úrovňového menu (<code class="inline">600→1</code>) a 2úrovňového menu (<code class="inline">700→1→1</code>).</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Konfigurační soubory (přepínatelné záložky) -->
+      <div class="card" data-tab-group="configs">
+        <h3 style="margin-top:0;">Konfigurační soubory Asterisku</h3>
+        <div class="tabs">
+          <button class="tab-btn active" data-tab="queues">queues.conf</button>
+          <button class="tab-btn" data-tab="extensions">extensions.conf</button>
+          <button class="tab-btn" data-tab="pjsip">pjsip.conf</button>
+        </div>
+
+        <div class="tab-panel active" data-panel="queues">
+          <div class="code-card">
+            <div class="code-header">
+              <span>/etc/asterisk/queues.conf</span>
+              <button class="copy-btn">Kopírovat</button>
+            </div>
+<pre>[general]
+persistentmembers = yes
+autofill = yes
+
+; --- Společná šablona fronty ---
+[fronta-zaklad](!)
+musicclass = default
+timeout = 5
+retry = 1
+maxlen = 0
+ringinuse = no
+joinempty = yes
+leavewhenempty = no
+member =&gt; PJSIP/101
+member =&gt; PJSIP/102
+member =&gt; PJSIP/103
+
+; --- Tři testované strategie podle zadání ---
+[fronta_ringall](fronta-zaklad)
+strategy = ringall
+
+[fronta_leastrecent](fronta-zaklad)
+strategy = leastrecent
+
+[fronta_fewestcalls](fronta-zaklad)
+strategy = fewestcalls</pre>
+          </div>
+        </div>
+
+        <div class="tab-panel" data-panel="extensions">
+          <div class="code-card">
+            <div class="code-header">
+              <span>/etc/asterisk/extensions.conf</span>
+              <button class="copy-btn">Kopírovat</button>
+            </div>
+<pre>[callcentrum]
+; --- Interní testovací volání ---
+exten =&gt; _10X,1,Dial(PJSIP/${EXTEN},20)
+ same =&gt; n,Hangup()
+exten =&gt; _20X,1,Dial(PJSIP/${EXTEN},20)
+ same =&gt; n,Hangup()
+
+; --- Hloubka IVR 0: Přímý vstup do fronty ---
+exten =&gt; 501,1,Answer()
+ same =&gt; n,Queue(fronta_ringall)
+ same =&gt; n,Hangup()
+
+exten =&gt; 502,1,Answer()
+ same =&gt; n,Queue(fronta_leastrecent)
+ same =&gt; n,Hangup()
+
+exten =&gt; 503,1,Answer()
+ same =&gt; n,Queue(fronta_fewestcalls)
+ same =&gt; n,Hangup()
+
+; --- Hloubka IVR 1 (klapka 600) a IVR 2 (klapka 700) ---
+exten =&gt; 600,1,Answer()
+ same =&gt; n,Goto(ivr-uroven1,s,1)
+
+exten =&gt; 700,1,Answer()
+ same =&gt; n,Goto(ivr-hlavni,s,1)
+
+[ivr-hlavni]
+exten =&gt; s,1,Background(beep)
+ same =&gt; n,WaitExten(5)
+exten =&gt; 1,1,Goto(ivr-uroven1,s,1)
+exten =&gt; t,1,Goto(s,1)
+exten =&gt; i,1,Goto(s,1)
+
+[ivr-uroven1]
+exten =&gt; s,1,Background(beep)
+ same =&gt; n,WaitExten(5)
+exten =&gt; 1,1,Queue(fronta_ringall)
+ same =&gt; n,Hangup()
+exten =&gt; 2,1,Queue(fronta_leastrecent)
+ same =&gt; n,Hangup()
+exten =&gt; 3,1,Queue(fronta_fewestcalls)
+ same =&gt; n,Hangup()
+exten =&gt; t,1,Goto(s,1)
+exten =&gt; i,1,Goto(s,1)</pre>
+          </div>
+        </div>
+
+        <div class="tab-panel" data-panel="pjsip">
+          <div class="code-card">
+            <div class="code-header">
+              <span>/etc/asterisk/pjsip.conf</span>
+              <button class="copy-btn">Kopírovat</button>
+            </div>
+<pre>[transport-udp]
+type=transport
+protocol=udp
+bind=0.0.0.0:5060
+
+; --- Šablony pro účty ---
+[endpoint-basic](!)
+type=endpoint
+context=callcentrum
+disallow=all
+allow=alaw,ulaw
+direct_media=no
+
+[auth-basic](!)
+type=auth
+auth_type=userpass
+password=heslo123
+
+[aor-basic](!)
+type=aor
+max_contacts=1
+
+; --- Agenti (101, 102, 103) a Volající (201, 202) ---
+[101](endpoint-basic)
+auth=101
+aors=101
+[101](auth-basic)
+username=101
+[101](aor-basic)
+
+[102](endpoint-basic)
+auth=102
+aors=102
+[102](auth-basic)
+username=102
+[102](aor-basic)
+
+[103](endpoint-basic)
+auth=103
+aors=103
+[103](auth-basic)
+username=103
+[103](aor-basic)
+
+[201](endpoint-basic)
+auth=201
+aors=201
+[201](auth-basic)
+username=201
+[201](aor-basic)
+
+[202](endpoint-basic)
+auth=202
+aors=202
+[202](auth-basic)
+username=202
+[202](aor-basic)</pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================================================================ -->
+    <!-- 4. NAMĚŘENÉ VÝSLEDKY A ANALÝZA                                   -->
+    <!-- ================================================================ -->
+    <section id="mereni">
+      <div class="section-header">
+        <div class="section-kicker">4. Experimentální měření</div>
+        <h2>Analýza čekacích dob, grafy a zachycená SIP signalizace</h2>
+      </div>
+
+      <!-- KPI souhrn -->
+      <div class="grid-4" style="margin-bottom: 24px;">
+        <div class="kpi-card teal">
+          <div class="kpi-label">Průměr ringall (3 agenti)</div>
+          <div class="kpi-value">2,20 s</div>
+          <div class="kpi-note">Nejrychlejší spojení, ale 60 % hovorů vzal 1 agent (102)</div>
+        </div>
+        <div class="kpi-card rose">
+          <div class="kpi-label">Penalizace RINGNOANSWER</div>
+          <div class="kpi-value">8–10 s</div>
+          <div class="kpi-note">U leastrecent / fewestcalls při 5s timeoutu + 1s retry</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Fronta při 1 agentovi</div>
+          <div class="kpi-value">9,00 s</div>
+          <div class="kpi-note">Souběžný hovor 202 čekal na uvolnění agenta 101</div>
+        </div>
+        <div class="kpi-card amber">
+          <div class="kpi-label">Režie hloubky IVR</div>
+          <div class="kpi-value">+2 až +3 s</div>
+          <div class="kpi-note">Celkem do spojení: 3 s (IVR 0) → 5 s (IVR 1) → 6 s (IVR 2)</div>
+        </div>
+      </div>
+
+      <!-- Souhrnná tabulka -->
+      <h3>Souhrnná tabulka čekacích dob podle scénářů</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Scénář / testovaný parametr</th>
+              <th class="ctr">Počet hovorů</th>
+              <th class="num">Čas v IVR (s)</th>
+              <th class="num">Průměr holdtime (s)</th>
+              <th class="num">Medián (s)</th>
+              <th class="ctr">Min–Max (s)</th>
+              <th class="num">Celkem do spojení (s)</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>ringall</strong> (3 agenti, bez IVR – klapka 501)</td>
+              <td class="ctr">5</td>
+              <td class="num">0</td>
+              <td class="num"><span class="pill pill-teal">2,20</span></td>
+              <td class="num">2,0</td>
+              <td class="ctr">1–4</td>
+              <td class="num"><strong>2,20</strong></td>
+            </tr>
+            <tr>
+              <td><strong>leastrecent</strong> – celkem (3 agenti, bez IVR – klapka 502)</td>
+              <td class="ctr">5</td>
+              <td class="num">0</td>
+              <td class="num"><span class="pill pill-amber">4,80</span></td>
+              <td class="num">2,0</td>
+              <td class="ctr">2–10</td>
+              <td class="num"><strong>4,80</strong></td>
+            </tr>
+            <tr class="sub-row">
+              <td>↳ z toho zvednuto napoprvé (bez timeoutu)</td>
+              <td class="ctr">3</td>
+              <td class="num">0</td>
+              <td class="num">2,00</td>
+              <td class="num">2,0</td>
+              <td class="ctr">2–2</td>
+              <td class="num">2,00</td>
+            </tr>
+            <tr class="sub-row">
+              <td>↳ z toho 1× nezvednuto (RINGNOANSWER 5 s + retry 1 s)</td>
+              <td class="ctr">2</td>
+              <td class="num">0</td>
+              <td class="num"><span class="pill pill-rose">9,00</span></td>
+              <td class="num">9,0</td>
+              <td class="ctr">8–10</td>
+              <td class="num">9,00</td>
+            </tr>
+            <tr>
+              <td><strong>fewestcalls</strong> – celkem (3 agenti, bez IVR – klapka 503)</td>
+              <td class="ctr">5</td>
+              <td class="num">0</td>
+              <td class="num"><span class="pill pill-amber">4,60</span></td>
+              <td class="num">3,0</td>
+              <td class="ctr">2–8</td>
+              <td class="num"><strong>4,60</strong></td>
+            </tr>
+            <tr class="sub-row">
+              <td>↳ z toho zvednuto napoprvé (bez timeoutu)</td>
+              <td class="ctr">3</td>
+              <td class="num">0</td>
+              <td class="num">2,33</td>
+              <td class="num">2,0</td>
+              <td class="ctr">2–3</td>
+              <td class="num">2,33</td>
+            </tr>
+            <tr class="sub-row">
+              <td>↳ z toho 1× nezvednuto (RINGNOANSWER 5 s + retry 1 s)</td>
+              <td class="ctr">2</td>
+              <td class="num">0</td>
+              <td class="num"><span class="pill pill-rose">8,00</span></td>
+              <td class="num">8,0</td>
+              <td class="ctr">8–8</td>
+              <td class="num">8,00</td>
+            </tr>
+            <tr>
+              <td><strong>1 aktivní agent</strong> – 1. hovor (volající 201, agent volný)</td>
+              <td class="ctr">1</td>
+              <td class="num">0</td>
+              <td class="num"><span class="pill pill-teal">1,00</span></td>
+              <td class="num">1,0</td>
+              <td class="ctr">1</td>
+              <td class="num"><strong>1,00</strong></td>
+            </tr>
+            <tr>
+              <td><strong>1 aktivní agent</strong> – 2. souběžný hovor (volající 202, fronta)</td>
+              <td class="ctr">1</td>
+              <td class="num">0</td>
+              <td class="num"><span class="pill pill-rose">9,00</span></td>
+              <td class="num">9,0</td>
+              <td class="ctr">9</td>
+              <td class="num"><strong>9,00</strong></td>
+            </tr>
+            <tr>
+              <td><strong>Hloubka IVR 0</strong> (přímý vstup – klapka 501, ringall)</td>
+              <td class="ctr">1</td>
+              <td class="num">0</td>
+              <td class="num">3,00</td>
+              <td class="num">3,0</td>
+              <td class="ctr">3</td>
+              <td class="num"><strong>3,00</strong></td>
+            </tr>
+            <tr>
+              <td><strong>Hloubka IVR 1</strong> (1 úroveň menu – klapka 600, ringall)</td>
+              <td class="ctr">1</td>
+              <td class="num">2</td>
+              <td class="num">3,00</td>
+              <td class="num">3,0</td>
+              <td class="ctr">3</td>
+              <td class="num"><strong>5,00</strong></td>
+            </tr>
+            <tr>
+              <td><strong>Hloubka IVR 2</strong> (2 úrovně menu – klapka 700, ringall)</td>
+              <td class="ctr">1</td>
+              <td class="num">3</td>
+              <td class="num">3,00</td>
+              <td class="num">3,0</td>
+              <td class="ctr">3</td>
+              <td class="num"><strong>6,00</strong></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Grafy (kliknutím se zvětší) -->
+      <h3>Vizualizace naměřených dat (kliknutím zobrazíte v plném rozlišení)</h3>
+      <div class="grid-2" style="margin-bottom: 28px;">
+        <figure class="chart-card" style="margin:0;">
+          <div class="chart-img-wrap">
+            <img src="img/graf_1_strategie_holdtime.png" alt="Porovnání čekací doby podle strategie fronty" />
+          </div>
+          <figcaption class="chart-caption">
+            <strong>Obr. 1: Průměrná čekací doba (holdtime) podle strategie fronty</strong>
+            Při okamžité reakci operátorů dosahují všechny tři strategie srovnatelných 2,00–2,33 s. Při jednom nezvednutí u sériových strategií (<code class="inline">leastrecent</code>, <code class="inline">fewestcalls</code>) však čekací doba skokově roste na 8,00–9,00 s.
+          </figcaption>
+        </figure>
+
+        <figure class="chart-card" style="margin:0;">
+          <div class="chart-img-wrap">
+            <img src="img/graf_2_rozlozeni_agenti.png" alt="Rozložení vyřízených hovorů mezi agenty" />
+          </div>
+          <figcaption class="chart-caption">
+            <strong>Obr. 2: Rozložení vyřízených hovorů mezi agenty (101–103)</strong>
+            Strategie <code class="inline">ringall</code> vedla k nerovnoměrnému zatížení (agent 102 přijal 3 z 5 hovorů, tj. 60 %), zatímco <code class="inline">leastrecent</code> a <code class="inline">fewestcalls</code> rozdělily hovory rovnoměrně v poměru 2 : 2 : 1.
+          </figcaption>
+        </figure>
+
+        <figure class="chart-card" style="margin:0;">
+          <div class="chart-img-wrap">
+            <img src="img/graf_3_pretizeni_1agent.png" alt="Vliv počtu agentů a časová osa přetížení" />
+          </div>
+          <figcaption class="chart-caption">
+            <strong>Obr. 3: Přetížení fronty při 1 aktivním agentovi a časová osa souběhu</strong>
+            Při pozastavení agentů 102 a 103 byl první hovor (201) spojen za 1 s, ale souběžný hovor (202) musel čekat 9 s ve frontě, dokud agent 101 v čase t = 12 s neukončil předchozí 11sekundový hovor.
+          </figcaption>
+        </figure>
+
+        <figure class="chart-card" style="margin:0;">
+          <div class="chart-img-wrap">
+            <img src="img/graf_4_hloubka_ivr.png" alt="Vliv hloubky IVR na celkovou dobu do spojení" />
+          </div>
+          <figcaption class="chart-caption">
+            <strong>Obr. 4: Vliv hloubky IVR na celkovou dobu do spojení</strong>
+            Samotný <code class="inline">holdtime</code> ve frontě zůstal konstantní (3 s), avšak průchod hlasovým menu lineárně zvýšil celkovou dobu čekání volajícího na 5 s (IVR 1) a 6 s (IVR 2).
+          </figcaption>
+        </figure>
+      </div>
+
+      <!-- Detailní tabulka všech 20 hovorů s filtrováním -->
+      <h3>Detailní log všech 20 testovacích hovorů</h3>
+      <div class="filter-bar">
+        <button class="filter-btn active" data-filter="all">Všechny hovory (20)</button>
+        <button class="filter-btn" data-filter="ringall">ringall (5)</button>
+        <button class="filter-btn" data-filter="leastrecent">leastrecent (5)</button>
+        <button class="filter-btn" data-filter="fewestcalls">fewestcalls (5)</button>
+        <button class="filter-btn" data-filter="overload">1 agent – přetížení (2)</button>
+        <button class="filter-btn" data-filter="ivr">Hloubka IVR (3)</button>
+      </div>
+      <div class="table-wrap">
+        <table id="detail-table">
+          <thead>
+            <tr>
+              <th class="ctr">#</th>
+              <th>Testovací blok</th>
+              <th class="ctr">Klapka</th>
+              <th class="ctr">Volající</th>
+              <th>Fronta</th>
+              <th class="ctr">Agent</th>
+              <th class="ctr">RINGNOANSWER</th>
+              <th class="num">IVR (s)</th>
+              <th class="num">holdtime (s)</th>
+              <th class="num">Celkem (s)</th>
+              <th class="num">Hovor (s)</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr data-cat="ringall"><td class="ctr">1</td><td>Strategie (3 agenti)</td><td class="ctr">501</td><td class="ctr">201</td><td>fronta_ringall</td><td class="ctr">103</td><td class="ctr">0</td><td class="num">0</td><td class="num">4</td><td class="num"><strong>4</strong></td><td class="num">4</td></tr>
+            <tr data-cat="ringall"><td class="ctr">2</td><td>Strategie (3 agenti)</td><td class="ctr">501</td><td class="ctr">201</td><td>fronta_ringall</td><td class="ctr">102</td><td class="ctr">0</td><td class="num">0</td><td class="num"><span class="pill pill-teal">1</span></td><td class="num"><strong>1</strong></td><td class="num">3</td></tr>
+            <tr data-cat="ringall"><td class="ctr">3</td><td>Strategie (3 agenti)</td><td class="ctr">501</td><td class="ctr">201</td><td>fronta_ringall</td><td class="ctr">101</td><td class="ctr">0</td><td class="num">0</td><td class="num"><span class="pill pill-teal">2</span></td><td class="num"><strong>2</strong></td><td class="num">2</td></tr>
+            <tr data-cat="ringall"><td class="ctr">4</td><td>Strategie (3 agenti)</td><td class="ctr">501</td><td class="ctr">201</td><td>fronta_ringall</td><td class="ctr">102</td><td class="ctr">0</td><td class="num">0</td><td class="num"><span class="pill pill-teal">2</span></td><td class="num"><strong>2</strong></td><td class="num">1</td></tr>
+            <tr data-cat="ringall"><td class="ctr">5</td><td>Strategie (3 agenti)</td><td class="ctr">501</td><td class="ctr">201</td><td>fronta_ringall</td><td class="ctr">102</td><td class="ctr">0</td><td class="num">0</td><td class="num"><span class="pill pill-teal">2</span></td><td class="num"><strong>2</strong></td><td class="num">1</td></tr>
+
+            <tr data-cat="leastrecent"><td class="ctr">6</td><td>Strategie (3 agenti)</td><td class="ctr">502</td><td class="ctr">201</td><td>fronta_leastrecent</td><td class="ctr">101</td><td class="ctr">0</td><td class="num">0</td><td class="num"><span class="pill pill-teal">2</span></td><td class="num"><strong>2</strong></td><td class="num">2</td></tr>
+            <tr data-cat="leastrecent"><td class="ctr">7</td><td>Strategie (3 agenti)</td><td class="ctr">502</td><td class="ctr">201</td><td>fronta_leastrecent</td><td class="ctr">102</td><td class="ctr">0</td><td class="num">0</td><td class="num"><span class="pill pill-teal">2</span></td><td class="num"><strong>2</strong></td><td class="num">2</td></tr>
+            <tr data-cat="leastrecent"><td class="ctr">8</td><td>Strategie (3 agenti)</td><td class="ctr">502</td><td class="ctr">201</td><td>fronta_leastrecent</td><td class="ctr">103</td><td class="ctr">0</td><td class="num">0</td><td class="num"><span class="pill pill-teal">2</span></td><td class="num"><strong>2</strong></td><td class="num">1</td></tr>
+            <tr data-cat="leastrecent"><td class="ctr">9</td><td>Strategie (3 agenti)</td><td class="ctr">502</td><td class="ctr">201</td><td>fronta_leastrecent</td><td class="ctr">101</td><td class="ctr"><span class="pill pill-rose">1 (5 s)</span></td><td class="num">0</td><td class="num"><span class="pill pill-rose">8</span></td><td class="num"><strong>8</strong></td><td class="num">3</td></tr>
+            <tr data-cat="leastrecent"><td class="ctr">10</td><td>Strategie (3 agenti)</td><td class="ctr">502</td><td class="ctr">201</td><td>fronta_leastrecent</td><td class="ctr">102</td><td class="ctr"><span class="pill pill-rose">1 (5 s)</span></td><td class="num">0</td><td class="num"><span class="pill pill-rose">10</span></td><td class="num"><strong>10</strong></td><td class="num">2</td></tr>
+
+            <tr data-cat="fewestcalls"><td class="ctr">11</td><td>Strategie (3 agenti)</td><td class="ctr">503</td><td class="ctr">201</td><td>fronta_fewestcalls</td><td class="ctr">101</td><td class="ctr">0</td><td class="num">0</td><td class="num">3</td><td class="num"><strong>3</strong></td><td class="num">1</td></tr>
+            <tr data-cat="fewestcalls"><td class="ctr">12</td><td>Strategie (3 agenti)</td><td class="ctr">503</td><td class="ctr">201</td><td>fronta_fewestcalls</td><td class="ctr">102</td><td class="ctr">0</td><td class="num">0</td><td class="num"><span class="pill pill-teal">2</span></td><td class="num"><strong>2</strong></td><td class="num">1</td></tr>
+            <tr data-cat="fewestcalls"><td class="ctr">13</td><td>Strategie (3 agenti)</td><td class="ctr">503</td><td class="ctr">201</td><td>fronta_fewestcalls</td><td class="ctr">103</td><td class="ctr">0</td><td class="num">0</td><td class="num"><span class="pill pill-teal">2</span></td><td class="num"><strong>2</strong></td><td class="num">1</td></tr>
+            <tr data-cat="fewestcalls"><td class="ctr">14</td><td>Strategie (3 agenti)</td><td class="ctr">503</td><td class="ctr">201</td><td>fronta_fewestcalls</td><td class="ctr">101</td><td class="ctr"><span class="pill pill-rose">1 (5 s)</span></td><td class="num">0</td><td class="num"><span class="pill pill-rose">8</span></td><td class="num"><strong>8</strong></td><td class="num">2</td></tr>
+            <tr data-cat="fewestcalls"><td class="ctr">15</td><td>Strategie (3 agenti)</td><td class="ctr">503</td><td class="ctr">201</td><td>fronta_fewestcalls</td><td class="ctr">102</td><td class="ctr"><span class="pill pill-rose">1 (5 s)</span></td><td class="num">0</td><td class="num"><span class="pill pill-rose">8</span></td><td class="num"><strong>8</strong></td><td class="num">1</td></tr>
+
+            <tr data-cat="overload"><td class="ctr">16</td><td>Přetížení (1 agent)</td><td class="ctr">501</td><td class="ctr">201</td><td>fronta_ringall</td><td class="ctr">101</td><td class="ctr">0</td><td class="num">0</td><td class="num"><span class="pill pill-teal">1</span></td><td class="num"><strong>1</strong></td><td class="num">11</td></tr>
+            <tr data-cat="overload"><td class="ctr">17</td><td>Přetížení (1 agent)</td><td class="ctr">501</td><td class="ctr">202</td><td>fronta_ringall</td><td class="ctr">101</td><td class="ctr">0</td><td class="num">0</td><td class="num"><span class="pill pill-rose">9</span></td><td class="num"><strong>9</strong></td><td class="num">5</td></tr>
+
+            <tr data-cat="ivr"><td class="ctr">18</td><td>Hloubka IVR 0</td><td class="ctr">501</td><td class="ctr">201</td><td>fronta_ringall</td><td class="ctr">101</td><td class="ctr">0</td><td class="num">0</td><td class="num">3</td><td class="num"><strong>3</strong></td><td class="num">3</td></tr>
+            <tr data-cat="ivr"><td class="ctr">19</td><td>Hloubka IVR 1</td><td class="ctr">600</td><td class="ctr">201</td><td>fronta_ringall</td><td class="ctr">101</td><td class="ctr">0</td><td class="num"><span class="pill pill-amber">2</span></td><td class="num">3</td><td class="num"><strong>5</strong></td><td class="num">3</td></tr>
+            <tr data-cat="ivr"><td class="ctr">20</td><td>Hloubka IVR 2</td><td class="ctr">700</td><td class="ctr">201</td><td>fronta_ringall</td><td class="ctr">101</td><td class="ctr">0</td><td class="num"><span class="pill pill-amber">3</span></td><td class="num">3</td><td class="num"><strong>6</strong></td><td class="num">2</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Reálné výřezy ze SIP PCAP a queue_log -->
+      <div class="card" data-tab-group="traces">
+        <h3 style="margin-top:0;">Ověření na síťové a aplikační vrstvě (výřezy ze zachycených dat)</h3>
+        <p>
+          Níže jsou přímé výřezy ze zachyceného souboru <code class="inline">mereni_sip.pcap</code> a logu
+          <code class="inline">queue_log.txt</code>, které prokazují chování jednotlivých strategií s milisekundovou přesností.
+        </p>
+        <div class="tabs">
+          <button class="tab-btn active" data-tab="sip-ringall">SIP PCAP: ringall (Hovor #2)</button>
+          <button class="tab-btn" data-tab="sip-least">SIP PCAP: leastrecent + timeout (Hovor #9)</button>
+          <button class="tab-btn" data-tab="qlog-excerpt">Výřez queue_log.txt</button>
+          <button class="tab-btn" data-tab="cdr-excerpt">Výřez cdr_master.csv</button>
+        </div>
+
+        <div class="tab-panel active" data-panel="sip-ringall">
+          <div class="code-card">
+            <div class="code-header">
+              <span>mereni_sip.pcap · Hovor #2 (201 → 501 · fronta_ringall) – paralelní INVITE a CANCEL</span>
+              <button class="copy-btn">Kopírovat</button>
+            </div>
+<pre>Pkt  | Rel. čas | Směr       | SIP zpráva / Hlavička Reason
+-----+----------+------------+--------------------------------------------------------------------
+# 65 | + 0.003s | 201 -&gt; 501 | INVITE sip:501@192.168.29.69 SIP/2.0 (autorizováno Digest MD5)
+# 67 | + 0.006s | 501 -&gt; 201 | SIP/2.0 200 OK (Asterisk přijímá hovor do Queue)
+# 70 | + 0.011s | PBX -&gt; 101 | INVITE sip:101@158.196.56.160:55980;ob SIP/2.0   &lt;-- Paralelní
+# 72 | + 0.014s | PBX -&gt; 102 | INVITE sip:102@158.196.56.160:65433;ob SIP/2.0   &lt;-- oslovení všech
+# 73 | + 0.020s | PBX -&gt; 103 | INVITE sip:103@158.196.56.160:60942;ob SIP/2.0   &lt;-- 3 agentů (9 ms)
+# 75 | + 0.029s | 101 -&gt; PBX | SIP/2.0 180 Ringing
+# 77 | + 0.043s | 102 -&gt; PBX | SIP/2.0 180 Ringing
+# 79 | + 0.043s | 103 -&gt; PBX | SIP/2.0 180 Ringing
+# 81 | + 1.495s | 102 -&gt; PBX | SIP/2.0 200 OK                                   &lt;-- Agent 102 zvedá
+# 83 | + 1.500s | PBX -&gt; 101 | CANCEL sip:101... | Reason: SIP;cause=200;text="Call completed elsewhere"
+# 84 | + 1.500s | PBX -&gt; 103 | CANCEL sip:103... | Reason: SIP;cause=200;text="Call completed elsewhere"
+# 87 | + 1.501s | 101 -&gt; PBX | SIP/2.0 487 Request Terminated
+# 88 | + 1.508s | 103 -&gt; PBX | SIP/2.0 487 Request Terminated</pre>
+          </div>
+        </div>
+
+        <div class="tab-panel" data-panel="sip-least">
+          <div class="code-card">
+            <div class="code-header">
+              <span>mereni_sip.pcap · Hovor #9 (201 → 502 · fronta_leastrecent) – sekvenční INVITE a 5s timeout</span>
+              <button class="copy-btn">Kopírovat</button>
+            </div>
+<pre>Pkt  | Rel. čas | Směr       | SIP zpráva / Poznámka
+-----+----------+------------+--------------------------------------------------------------------
+#287 | + 0.002s | 201 -&gt; 502 | INVITE sip:502@192.168.29.69 SIP/2.0
+#289 | + 0.005s | 502 -&gt; 201 | SIP/2.0 200 OK (vstup do fronta_leastrecent)
+#293 | + 0.013s | PBX -&gt; 101 | INVITE sip:101@158.196.56.160:55980;ob SIP/2.0   &lt;-- Osloven JEN agent 101
+#295 | + 0.027s | 101 -&gt; PBX | SIP/2.0 180 Ringing
+     |   ...    |            | [5,002 s vyzvánění bez odpovědi -&gt; vyprší timeout = 5 s]
+#297 | + 5.015s | PBX -&gt; 101 | CANCEL sip:101... | Reason: Q.850;cause=0
+#299 | + 5.016s | 101 -&gt; PBX | SIP/2.0 487 Request Terminated
+     |   ...    |            | [1,002 s pauza -&gt; parametr retry = 1 s]
+#302 | + 6.017s | PBX -&gt; 101 | INVITE sip:101@158.196.56.160:55980;ob SIP/2.0   &lt;-- Nový pokus (bez autopause)
+#304 | + 6.046s | 101 -&gt; PBX | SIP/2.0 180 Ringing
+#306 | + 7.966s | 101 -&gt; PBX | SIP/2.0 200 OK (spojeno po celkovém holdtime = 8 s)</pre>
+          </div>
+        </div>
+
+        <div class="tab-panel" data-panel="qlog-excerpt">
+          <div class="code-card">
+            <div class="code-header">
+              <span>mereni/queue_log.txt · Výřez událostí RINGNOANSWER, PAUSE a hloubky IVR</span>
+              <button class="copy-btn">Kopírovat</button>
+            </div>
+<pre># Hovor #9 (leastrecent s RINGNOANSWER 5000 ms -&gt; holdtime = 8 s)
+1795461327|1795461327.75|fronta_leastrecent|NONE|ENTERQUEUE||201|1
+1795461332|1795461327.75|fronta_leastrecent|PJSIP/101|RINGNOANSWER|5000
+1795461335|1795461327.75|fronta_leastrecent|PJSIP/101|CONNECT|8|1795461333.77|1
+1795461338|1795461327.75|fronta_leastrecent|PJSIP/101|COMPLETEAGENT|8|3|1
+
+# Přetížení při 1 agentovi (201 mluví 11 s, souběžný 202 čeká 9 s ve frontě)
+1795461881|1795461881.104|fronta_ringall|NONE|ENTERQUEUE||201|1
+1795461882|1795461881.104|fronta_ringall|PJSIP/101|CONNECT|1|1795461881.105|1
+1795461886|1795461886.106|fronta_ringall|NONE|ENTERQUEUE||202|1
+1795461893|1795461881.104|fronta_ringall|PJSIP/101|COMPLETEAGENT|1|11|1
+1795461895|1795461886.106|fronta_ringall|PJSIP/101|CONNECT|9|1795461893.108|2
+1795461900|1795461886.106|fronta_ringall|PJSIP/101|COMPLETEAGENT|9|5|1
+
+# Hloubka IVR 2 (hovor začal v 1795462006, vstup do fronty až v 1795462009 -&gt; +3 s v IVR)
+1795462009|1795462006.124|fronta_ringall|NONE|ENTERQUEUE||201|1
+1795462012|1795462006.124|fronta_ringall|PJSIP/101|CONNECT|3|1795462009.125|2</pre>
+          </div>
+        </div>
+
+        <div class="tab-panel" data-panel="cdr-excerpt">
+          <div class="code-card">
+            <div class="code-header">
+              <span>mereni/cdr_master.csv · Záznamy pro test přetížení a IVR kontext</span>
+              <button class="copy-btn">Kopírovat</button>
+            </div>
+<pre>"","201","501","callcentrum",""""" &lt;201&gt;","PJSIP/201-0000003c","PJSIP/101-0000003d","Queue","fronta_ringall","2026-11-23 19:24:41","2026-11-23 19:24:41","2026-11-23 19:24:53",12,12,"ANSWERED","DOCUMENTATION","1795461881.104",""
+"","202","501","callcentrum",""""" &lt;202&gt;","PJSIP/202-0000003e","PJSIP/101-0000003f","Queue","fronta_ringall","2026-11-23 19:24:46","2026-11-23 19:24:46","2026-11-23 19:25:00",13,13,"ANSWERED","DOCUMENTATION","1795461886.106",""
+"","201","1","ivr-uroven1",""""" &lt;201&gt;","PJSIP/201-00000044","PJSIP/101-00000045","Queue","fronta_ringall","2026-11-23 19:26:29","2026-11-23 19:26:29","2026-11-23 19:26:37",8,8,"ANSWERED","DOCUMENTATION","1795461989.117",""
+"","201","1","ivr-uroven1",""""" &lt;201&gt;","PJSIP/201-00000048","PJSIP/101-00000049","Queue","fronta_ringall","2026-11-23 19:26:46","2026-11-23 19:26:46","2026-11-23 19:26:54",8,8,"ANSWERED","DOCUMENTATION","1795462006.124",""</pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================================================================ -->
+    <!-- 5. VLASTNÍ NÁZOR A PŘÍNOS                                        -->
+    <!-- ================================================================ -->
+    <section id="prinos">
+      <div class="section-header">
+        <div class="section-kicker">5. Zhodnocení</div>
+        <h2>Vlastní názor na problematiku a praktický přínos</h2>
+      </div>
+      <div class="card">
+        <p>
+          Praktická měření potvrdila, že neexistuje jedna univerzálně nejlepší strategie fronty — volba je vždy
+          kompromisem mezi <strong>rychlostí odbavení zákazníka (SLA)</strong> a <strong>spravedlivým rozložením zátěže týmu</strong>:
+        </p>
+        <ul>
+          <li><strong><code class="inline">ringall</code></strong> je ideální pro malé týmy (2–4 operátoři) a krizové linky, kde je prioritou minimální čekací doba (naměřeno 2,20 s). Při větším počtu agentů však zahlcuje pracoviště neustálým vyzváněním, zvyšuje signalizační režii SIP (<code class="inline">INVITE</code> + <code class="inline">CANCEL</code> všem) a vede k tomu, že aktivnější operátoři vyřídí většinu hovorů (v testu agent 102 přijal 60 %).</li>
+          <li><strong><code class="inline">leastrecent</code> a <code class="inline">fewestcalls</code></strong> výborně vyrovnávají pracovní zátěž (v testu rovnoměrný poměr 2 : 2 : 1), ale jsou citlivé na situaci, kdy operátor odejde od stolu bez pozastavení v systému. Každé nezvednutí prodlužuje čekání volajícího minimálně o <code class="inline">timeout + retry</code> (naměřeno 8–10 s místo 2 s).</li>
+        </ul>
+
+        <div class="callout amber">
+          <div class="callout-title">Klíčové praktické zjištění z logů: nutnost parametru <code class="inline">autopause = yes</code></div>
+          Při detailní analýze hovorů #9, #10, #14 a #15 v <code class="inline">queue_log.txt</code> i v <code class="inline">mereni_sip.pcap</code>
+          se ukázal důležitý detail chování Asterisku: pokud u strategií <code class="inline">leastrecent</code> nebo
+          <code class="inline">fewestcalls</code> vyprší u agenta <code class="inline">RINGNOANSWER</code>, neaktualizuje se jeho čas
+          posledního hovoru ani počítadlo vyřízených hovorů. Bez zapnutého parametru <strong><code class="inline">autopause = yes</code></strong>
+          proto Asterisk po uplynutí <code class="inline">retry</code> osloví <strong>znovu toho samého neodpovídajícího agenta</strong>.
+          V reálném nasazení je proto nutné u těchto dvou strategií vždy zapínat <code class="inline">autopause = yes</code>
+          (případně zvolit cyklickou strategii <code class="inline">rrmemory</code>), jinak jediný nepřítomný operátor
+          dokáže zablokovat doručování hovorů.
+        </div>
+
+        <div class="callout teal">
+          <div class="callout-title">Doporučení pro návrh hloubky IVR</div>
+          Přestože IVR v testu používalo jen krátký tón <code class="inline">beep</code>, každá úroveň menu přímo navýšila celkový
+          čas do spojení s operátorem (+2 s pro IVR 1, +3 s pro IVR 2 při konstantním <code class="inline">holdtime = 3 s</code>).
+          V produkčním prostředí s namluvenými hláškami (10–15 s na úroveň) znamená zbytečně hluboké IVR výrazný nárůst
+          frustrace volajících. Rozumným maximem jsou <strong>1–2 úrovně menu</strong> s možností okamžité volby (tzv. <em>barge-in</em>,
+          který v Asterisku zajišťuje aplikace <code class="inline">Background()</code>).
+        </div>
+      </div>
+    </section>
+
+    <!-- ================================================================ -->
+    <!-- 6. ZÁVĚR                                                         -->
+    <!-- ================================================================ -->
+    <section id="zaver">
+      <div class="section-header">
+        <div class="section-kicker">6. Závěr</div>
+        <h2>Shrnutí dosažených výsledků</h2>
+      </div>
+      <div class="card">
+        <p>
+          V rámci projektu bylo na ústředně <strong>Asterisk 22.5.2</strong> navrženo, nakonfigurováno a otestováno funkční
+          VoIP call centrum pokrývající všechny požadavky přidělené varianty. Na vzorku <strong>20 testovacích hovorů</strong>
+          (ověřených z <code class="inline">queue_log</code>, <code class="inline">cdr_master.csv</code> i síťového záznamu
+          <code class="inline">mereni_sip.pcap</code>) byla kvantifikována závislost čekací doby na strategii směrování,
+          počtu aktivních agentů i hloubce stromu IVR.
+        </p>
+        <p style="margin-bottom:0;">
+          Naměřená data jednoznačně potvrdila, že <code class="inline">ringall</code> poskytuje nejnižší a nejstabilnější
+          čekací dobu (2,20 s), zatímco <code class="inline">leastrecent</code> a <code class="inline">fewestcalls</code>
+          vyrovnávají zátěž operátorů za cenu výrazné citlivosti na neodpovídající agenty (nárůst na 8–10 s). Dále bylo
+          prokázáno, že pokles kapacity na jediného agenta při souběhu hovorů okamžitě vytváří frontu (9 s) a každá přidaná
+          vrstva IVR aditivně prodlužuje celkovou dobu čekání volajícího před spojením.
+        </p>
+      </div>
+    </section>
+
+    <!-- ================================================================ -->
+    <!-- 7. DŮKAZOVÝ BALÍČEK A DEMO VIDEO                                 -->
+    <!-- ================================================================ -->
+    <section id="dukazy">
+      <div class="section-header">
+        <div class="section-kicker">7. Důkazový balíček</div>
+        <h2>Git repozitář, zdrojová data a záložní demo video</h2>
+      </div>
+
+      <div class="grid-3" style="margin-bottom: 22px;">
+        <div class="evidence-card">
+          <div>
+            <h4>Git repozitář projektu</h4>
+            <p>
+              Kompletní repozitář s průběžnou historií commitů, konfiguračními soubory Asterisku (<code class="inline">config/</code>),
+              naměřenými logy (<code class="inline">mereni/</code>) a zdrojovým kódem této dokumentace (<code class="inline">docs/</code>).
+            </p>
+          </div>
+          <a href="https://github.com/Tesa04/VoIP_projekt_callcentrum" target="_blank" rel="noopener" class="btn btn-blue">Otevřít na GitHubu ↗</a>
+        </div>
+
+        <div class="evidence-card">
+          <div>
+            <h4>Zachycené logy a SIP PCAP</h4>
+            <p>
+              Reálná surová data z měření: síťový capture <code class="inline">mereni_sip.pcap</code> (508 SIP paketů),
+              <code class="inline">queue_log.txt</code> a kompletní export <code class="inline">cdr_master.csv</code>.
+            </p>
+          </div>
+          <a href="https://github.com/Tesa04/VoIP_projekt_callcentrum/tree/main/mereni" target="_blank" rel="noopener" class="btn btn-blue">Stáhnout data (/mereni) ↗</a>
+        </div>
+
+        <div class="evidence-card">
+          <div>
+            <h4>Vyhodnocení v Excelu &amp; Konfigurace</h4>
+            <p>
+              Přehledová tabulka <code class="inline">tabulka_cekacich_dob.xlsx</code> s dynamickými vzorci a grafem +
+              použité soubory <code class="inline">pjsip.conf</code>, <code class="inline">queues.conf</code>, <code class="inline">extensions.conf</code>.
+            </p>
+          </div>
+          <a href="https://github.com/Tesa04/VoIP_projekt_callcentrum/tree/main/config" target="_blank" rel="noopener" class="btn btn-blue">Zobrazit konfiguraci (/config) ↗</a>
+        </div>
+      </div>
+
+      <!-- Demo video (2–3 min) -->
+      <div class="video-placeholder">
+        <h4>Záložní demo video (2–3 min)</h4>
+        <p>
+          Ukázka živého provozu call centra na Asterisku: průchod dvoustupňovým IVR (klapka 700), porovnání strategií
+          <code>ringall</code> vs. <code>leastrecent</code> / <code>fewestcalls</code> v Asterisk CLI a oknech MicroSIP,
+          a výpis statistik <code>queue show</code>.
+        </p>
+        <!--
+          TODO: Po nahrání videa (např. jako neveřejné na YouTube nebo do složky docs/video/demo.mp4)
+          nahraďte tento blok vloženým přehrávačem <iframe> nebo <video controls src="video/demo.mp4"></video>:
+
+          <div style="position:relative;padding-bottom:56.25%;height:0;overflow:hidden;border-radius:10px;max-width:860px;margin:0 auto;">
+            <iframe src="https://www.youtube.com/embed/VASE_VIDEO_ID"
+                    style="position:absolute;top:0;left:0;width:100%;height:100%;border:0;"
+                    allowfullscreen></iframe>
+          </div>
+        -->
+        <span class="badge badge-glass">Připraveno k vložení odkazu na demo video (YouTube / MP4)</span>
+      </div>
+    </section>
+
+    <!-- ================================================================ -->
+    <!-- 8. REFERENCE                                                     -->
+    <!-- ================================================================ -->
+    <section id="reference">
+      <div class="section-header">
+        <div class="section-kicker">8. Reference</div>
+        <h2>Použitá dokumentace a zdroje</h2>
+      </div>
+      <div class="card">
+        <ol class="ref-list">
+          <li>
+            <strong>Sangoma Technologies – Asterisk Documentation:</strong> Application <code class="inline">Queue</code> &amp; <code class="inline">queues.conf</code> (strategie směrování <code class="inline">ringall</code>, <code class="inline">leastrecent</code>, <code class="inline">fewestcalls</code>, logování <code class="inline">queue_log</code>).
+            Dostupné z: <a href="https://docs.asterisk.org/" target="_blank" rel="noopener">https://docs.asterisk.org/</a>
+          </li>
+          <li>
+            <strong>Sangoma Technologies – Asterisk PJSIP Configuration:</strong> Dokumentace modulu <code class="inline">res_pjsip</code> a struktury konfiguračního souboru <code class="inline">pjsip.conf</code>.
+            Dostupné z: <a href="https://docs.asterisk.org/Configuration/Channel-Drivers/SIP/Configuring-res_pjsip/" target="_blank" rel="noopener">https://docs.asterisk.org/Configuration/Channel-Drivers/SIP/Configuring-res_pjsip/</a>
+          </li>
+          <li>
+            <strong>ROSENBERG, J. et al. (2002):</strong> <em>RFC 3261 – SIP: Session Initiation Protocol</em>. Internet Engineering Task Force (IETF).
+            Dostupné z: <a href="https://datatracker.ietf.org/doc/html/rfc3261" target="_blank" rel="noopener">https://datatracker.ietf.org/doc/html/rfc3261</a>
+          </li>
+          <li>
+            <strong>SCHULZRINNE, H., TAYLOR, T. (2006):</strong> <em>RFC 4733 – RTP Payload for DTMF Digits, Telephony Tones, and Telephony Signals</em>. IETF.
+            Dostupné z: <a href="https://datatracker.ietf.org/doc/html/rfc4733" target="_blank" rel="noopener">https://datatracker.ietf.org/doc/html/rfc4733</a>
+          </li>
+          <li>
+            <strong>MicroSIP:</strong> Open-source přenosný SIP softphone založený na knihovně PJSIP (použitá verze 3.23.6).
+            Dostupné z: <a href="https://www.microsip.org/" target="_blank" rel="noopener">https://www.microsip.org/</a>
+          </li>
+          <li>
+            <strong>Wireshark &amp; tcpdump:</strong> Nástroje pro zachytávání a analýzu síťového provozu a SIP signalizace (VoIP Calls / Flow Sequence).
+            Dostupné z: <a href="https://www.wireshark.org/" target="_blank" rel="noopener">https://www.wireshark.org/</a>
+          </li>
+        </ol>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Lightbox pro zvětšení grafů -->
+  <div id="lightbox" class="lightbox" role="dialog" aria-label="Zvětšený náhled grafu">
+    <img id="lightbox-img" src="" alt="" />
+  </div>
+
+  <!-- Patička -->
+  <footer>
+    <div class="footer-inner">
+      <div>VoIP I · Semestrální projekt – Call centrum na Asterisku · FEI VŠB-TU Ostrava (2026)</div>
+      <div>
+        <a href="https://github.com/Tesa04/VoIP_projekt_callcentrum" target="_blank" rel="noopener">GitHub: Tesa04/VoIP_projekt_callcentrum</a>
+      </div>
+    </div>
+  </footer>
+
+  <script src="script.js"></script>
+</body>
+</html>
